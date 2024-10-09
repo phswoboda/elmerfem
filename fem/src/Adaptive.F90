@@ -50,7 +50,8 @@ MODULE Adaptive
   USE LoadMod
   USE MeshUtils
   USE MeshRemeshing
-
+  USE SaveUtils
+  
   IMPLICIT NONE
 
   
@@ -1279,114 +1280,144 @@ CONTAINS
     TYPE(Mesh_t), POINTER :: NewMesh, RefMesh
 !------------------------------------------------------------------------------
     TYPE(Mesh_t), POINTER :: Mesh
-    INTEGER :: i,j,k,n
+    INTEGER :: i,j,k,n,dim
     REAL(KIND=dp) :: Lambda
+    REAL(KIND=dp), POINTER :: HValueF(:)
     CHARACTER(:), ALLOCATABLE :: MeshCommand, Name, MeshInputFile
 !------------------------------------------------------------------------------
 
-    OPEN( 11, STATUS='UNKNOWN', FILE='bgmesh' )
-    WRITE( 11,* ) COUNT( NodalError > 100*AEPS )
+    dim = CoordinateSystemDimension()
+    ALLOCATE(HvalueF(SIZE(HValue)))
 
+    ! Create a temporal field that includes the desired mesh density where Hvalue has been computed. 
+    ! This is in terms of desired mesh density, currently -1 value is given if the nodal error is zero
+    ! implying that nothing is computed here. 
+    HValueF = -1.0_dp
     DO i=1,RefMesh % NumberOfNodes
-       IF ( NodalError(i) > 100*AEPS ) THEN
-          Lambda = ( ErrorLimit / NodalError(i) ) ** ( 1.0d0 / hConvergence(i) )
+      IF ( NodalError(i) > 100*AEPS ) THEN
+        Lambda = ( ErrorLimit / NodalError(i) ) ** ( 1.0d0 / hConvergence(i) )        
+        IF ( RefMesh % AdaptiveDepth < 1 ) THEN
+          Lambda = HValue(i) * MAX( MIN( Lambda, 1.33d0), 0.75d0)
+        ELSE
+          Lambda = HValue(i) * MAX(MIN(Lambda, MaxChange), 1.0d0/MaxChange)
+        END IF        
+        IF( .NOT.Coarsening ) Lambda = MIN( Lambda, Hvalue(i) )        
 
-          IF ( RefMesh % AdaptiveDepth < 1 ) THEN
-             Lambda = HValue(i) * MAX( MIN( Lambda, 1.33d0), 0.75d0)
-          ELSE
-             Lambda = HValue(i) * MAX(MIN(Lambda, MaxChange), 1.0d0/MaxChange)
-          END IF
-
-          IF( .NOT.Coarsening ) Lambda = MIN( Lambda, Hvalue(i) )
-
-          IF ( maxH > 0 ) Lambda = MIN( Lambda, maxH )
-          IF ( minH > 0 ) Lambda = MAX( Lambda, minH )
-
-          IF ( CoordinateSystemDimension() == 2 ) THEN
-             WRITE(11,'(3e23.15)') RefMesh % Nodes % x(i), &
-                  RefMesh % Nodes % y(i), Lambda
-          ELSE
-             WRITE(11,'(4e23.15)') RefMesh % Nodes % x(i), &
-                  RefMesh % Nodes % y(i), &
-                  RefMesh % Nodes % z(i), Lambda
-          END IF
-       ELSE
-          IF ( CoordinateSystemDimension() == 2 ) THEN
-             WRITE(11,'(3e23.15)') RefMesh % Nodes % x(i), &
-                                   RefMesh % Nodes % y(i), HValue(i)
-          ELSE
-             WRITE(11,'(4e23.15)') RefMesh % Nodes % x(i), &
-                                   RefMesh % Nodes % y(i), &
-                                   RefMesh % Nodes % z(i), HValue(i)
-          END IF
-       END IF
+        IF ( maxH > 0 ) Lambda = MIN( Lambda, maxH )
+        IF ( minH > 0 ) Lambda = MAX( Lambda, minH )        
+        HValueF(i) = Lambda
+      END IF
     END DO
+
+    IF( ListGetLogical( Params,'Adaptive Remesh Use Gmsh', Found ) ) THEN
+      CALL Info( Caller,'Saving in gmsh 2.0 (.msh) format' )
+
+      ! A cludge to change the pointer and save results in Gmsh format.
+      BLOCK
+        REAL(KIND=dp), POINTER :: PtoHvalue(:)
+        TYPE(Variable_t), POINTER :: HVar
+        HVar => VariableGet( RefMesh % Variables,'Hvalue')
+        pToHvalue => HVar % Values
+        HVar % Values => HvalueF        
+        CALL ListAddString(Solver % Values,'Scalar Field 1','Hvalue')
+        CALL ListAddLogical(Solver % Values,'File Append',.FALSE.)
+        CALL ListAddString(Solver % Values, 'Output File Name', 'gmsh_bgmesh.msh')        
+        CALL SaveGmshOutput( Model,Solver,0.0_dp,.FALSE.)
+        HVar % Values => PtoHvalue
+      END BLOCK
+
+      MeshCommand = ListGetString( Solver % Values,'Mesh Command',Found) 
+      IF( Found ) THEN
+        CALL Info('ReMesh','Meshing command: '//TRIM(MeshCommand),Level=10)
+        CALL SystemCommand( MeshCommand )
+      END IF
+        
+      MeshCommand = ListGetString( Solver % Values,'Mesh Conversion Command',Found)
+      IF( Found ) THEN
+        CALL Info('ReMesh','Conversion command: '//TRIM(MeshCommand),Level=10)
+        CALL SystemCommand( MeshCommand )
+      END IF
+    ELSE      
+      ! Save background mesh in Elmer mesh format.
+      OPEN( 11, STATUS='UNKNOWN', FILE='bgmesh.nodes' )
+      WRITE( 11,* ) COUNT( HValueF > 0.0_dp )           
+      DO i=1,RefMesh % NumberOfNodes
+        IF(.NOT. (HValueF(i) > 0.0_dp )) CYCLE
+        IF (dim == 2 ) THEN
+          WRITE(11,'(3e23.15)') RefMesh % Nodes % x(i), &
+              RefMesh % Nodes % y(i), HValueF(i)
+        ELSE
+          WRITE(11,'(4e23.15)') RefMesh % Nodes % x(i), &
+              RefMesh % Nodes % y(i), &
+              RefMesh % Nodes % z(i), HValueF(i)
+        END IF
+      END DO
+      WRITE(11,*) 0
+      CLOSE(11)
+
+      ! Save the current mesh in Elmer mesh format 
+      Path = ListGetString( Params, 'Adaptive Mesh Name', Found )
+      IF ( .NOT. Found ) Path = 'RefinedMesh'
+
+      i = RefMesh % AdaptiveDepth + 1
+      nLen = LEN_TRIM(Path)
+      Path = Path(1:nlen) // I2S(i)
+
+      nLen = LEN_TRIM(OutputPath)
+      IF ( nlen > 0 ) THEN
+        Path = OutputPath(1:nlen) // '/' // TRIM(Path)
+      ELSE
+        Path = TRIM(Path)
+      END IF
+
+      CALL MakeDirectory( TRIM(Path) // CHAR(0) )
+      CALL WriteMeshToDisk( RefMesh, Path )
+
+      Mesh => RefMesh
+      DO WHILE( ASSOCIATED( Mesh ) )
+        IF ( Mesh % AdaptiveDepth == 0 ) EXIT
+        Mesh => Mesh % Parent
+      END DO
+
+      MeshInputFile = ListGetString( Params, 'Mesh Input File', Found )
+      IF ( .NOT. Found ) THEN
+        MeshInputFile = ListGetString( Model % Simulation, 'Mesh Input File' )
+      END IF
+
+      MeshCommand = TRIM(OutputPath) // '/' // TRIM(Mesh % Name) // '/' // &
+          TRIM( MeshInputFile )
+
+      SELECT CASE( dim )
+      CASE(2)
+        ! Legacy mesh generator from the Elmer suite.
+        MeshCommand = 'Mesh2D '//TRIM(MeshCommand)//' '//TRIM(Path)// ' --bgmesh=bgmesh.nodes'
+      CASE(3)
+        MeshCommand = 'Mesh3D '//TRIM(MeshCommand)//' '//TRIM(Path)//' bgmesh.nodes'
+      END SELECT
     
-    WRITE(11,*) 0
-    CLOSE(11)
-
-    Path = ListGetString( Params, 'Adaptive Mesh Name', Found )
-    IF ( .NOT. Found ) Path = 'RefinedMesh'
-
-    i = RefMesh % AdaptiveDepth + 1
-    nLen = LEN_TRIM(Path)
-    Path = Path(1:nlen) // I2S(i)
-
-    nLen = LEN_TRIM(OutputPath)
-    IF ( nlen > 0 ) THEN
-       Path = OutputPath(1:nlen) // '/' // TRIM(Path)
-    ELSE
-       Path = TRIM(Path)
+      CALL Info('ReMesh','System command: '//TRIM(MeshCommand),Level=10)
+      CALL SystemCommand( MeshCommand )
     END IF
-
-    CALL MakeDirectory( TRIM(Path) // CHAR(0) )
-    CALL WriteMeshToDisk( RefMesh, Path )
-
-    Mesh => RefMesh
-    DO WHILE( ASSOCIATED( Mesh ) )
-       IF ( Mesh % AdaptiveDepth == 0 ) EXIT
-       Mesh => Mesh % Parent
-    END DO
-
-    MeshInputFile = ListGetString( Params, 'Mesh Input File', Found )
-
-    IF ( .NOT. Found ) THEN
-       MeshInputFile = ListGetString( Model % Simulation, 'Mesh Input File' )
-    END IF
-
-    MeshCommand = TRIM(OutputPath) // '/' // TRIM(Mesh % Name) // '/' // &
-                          TRIM( MeshInputFile )
-
-    SELECT CASE( CoordinateSystemDimension() )
-    CASE(2)
-       MeshCommand = 'Mesh2D ' // TRIM(MeshCommand) // ' ' // &
-                      TRIM(Path) // ' --bgmesh=bgmesh'
-
-    CASE(3)
-       MeshCommand = 'Mesh3D ' // TRIM(MeshCommand) // ' ' // &
-                      TRIM(Path) // ' bgmesh'
-    END SELECT
-
-    CALL Info('ReMesh','System command: '//TRIM(MeshCommand),Level=10)
-    CALL SystemCommand( MeshCommand )
-
+      
+    ! Load the new mesh in Elmer format
     NewMesh => LoadMesh2( Model, OutPutPath, Path, .FALSE., 1, 0 )
 
+    ! Loading Gebhart factors is more or less obsolite. 
     IF ( Solver % Variable % Name == 'temperature' ) THEN
        Name = ListGetString( Model % Simulation, 'Gebhart Factors', Found )
        IF ( Found ) THEN
           MeshCommand = 'View ' // TRIM(OutputPath) // &
                 '/' // TRIM(Mesh % Name) // ' ' // TRIM(Path)
-
           CALL SystemCommand( MeshCommand )
 
           Name = TRIM(OutputPath) // '/' // &
-                       TRIM(Mesh % Name) // '/' // TRIM(Name)
-
+              TRIM(Mesh % Name) // '/' // TRIM(Name)
           CALL LoadGebhartFactors( NewMesh, TRIM(Name) )
        END IF
     END IF
 
+    DEALLOCATE(HvalueF)
+    
 !------------------------------------------------------------------------------
   END FUNCTION External_ReMesh
 !------------------------------------------------------------------------------
