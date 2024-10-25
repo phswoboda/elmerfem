@@ -142,7 +142,37 @@ IF(WITH_OCC)
 ENDIF()
 
 IF(WITH_VTK)
-  FIND_PACKAGE(VTK REQUIRED)
+# ADD_DEFINITIONS(-DEG_VTK)
+# list(APPEND CMAKE_CXX_SOURCE_FILE_EXTENSIONS c)
+#find_package(OpenMP REQUIRED OpenMP::OpenMP_CXX)
+find_package(LibXml2 REQUIRED)
+#find_package(OpenVR REQUIRED)
+find_package(OpenXR REQUIRED)
+find_package(Python3 REQUIRED)
+#find_package(EXPAT REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(TBB REQUIRED)
+SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} /usr/lib/cmake/OpenVDB)
+find_package(OpenVDB REQUIRED)
+FIND_PACKAGE(VTK REQUIRED
+   CommonColor
+   CommonCore
+   CommonDataModel
+   FiltersCore
+   FiltersSources
+   FiltersGeometry
+   FiltersModeling
+   FiltersFlowPaths
+   InteractionStyle
+   IOXML
+   RenderingContextOpenGL2
+   RenderingCore
+   RenderingFreeType
+   RenderingGL2PSOpenGL2
+   RenderingOpenGL2
+   RenderingAnnotation
+   InteractionWidgets
+   GUISupportQt)
 
   INCLUDE(testVTKcapabilities)
 
