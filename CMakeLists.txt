@@ -23,6 +23,9 @@ IF(APPLE)
   SET(CMAKE_MACOSX_RPATH 1)
 ENDIF()
 
+add_compile_options(-Wno-error=implicit-function-declaration)
+add_link_options(-Wl,--copy-dt-needed-entries)
+
 #shamelessly borrowed from FreeCAD project: https://github.com/FreeCAD/FreeCAD/blob/master/cMake/FreeCAD_Helpers/SetupPython.cmake
 # For building on OS X
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
